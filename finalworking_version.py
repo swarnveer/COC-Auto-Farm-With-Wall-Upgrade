@@ -1266,8 +1266,17 @@ def finish_attack():
                     break
 
         elif not confirmation_clicked:
-            # Once End Battle was clicked, do not skip confirmation or click
-            # Return Home prematurely. Keep searching for the OK image.
+            # The battle can finish on its own while the confirmation dialog
+            # is still appearing. Check Return Home first so we do not wait
+            # forever for a confirmation button that will never exist.
+            return_home_loc = _locate_cleanup_template("return_home")
+            if return_home_loc:
+                status("RETURN HOME FOUND — clicking it", "green", phase="HOME")
+                _click_return_home(return_home_loc)
+                return
+
+            # If Return Home is not visible yet, look for the End Battle
+            # confirmation and then continue polling Return Home normally.
             if _click_cleanup_template_once(
                 "attack_end_battle_confirm",
                 wait=1.0,
