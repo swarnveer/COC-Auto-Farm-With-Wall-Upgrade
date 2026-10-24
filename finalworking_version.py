@@ -144,6 +144,7 @@ RETURN_HOME_STABLE_HITS = 2
 HOME_CONFIRM_TIMEOUT = 20.0
 HOME_CONFIRM_STABLE_HITS = 2
 POST_RETURN_HOME_WAIT = 3.2
+CLEANUP_MATCH_CONFIDENCES = (0.90, 0.84, 0.78)
 CLOUD_SEARCH_POLL = 1.0
 LAUNCH_PAUSE_1 = 2.6
 LAUNCH_PAUSE_2 = 0.95
@@ -903,11 +904,13 @@ def _click_item_template(name, timeout=8.0, wait=0.5, phase="WALL DUMP"):
     return False
 
 
-def _locate_item_template(name):
+def _locate_item_template(name, *, grayscale=True, confidences=None):
     path = os.path.join(ITEM_DIR, f"{name}.png")
-    for confidence in (0.82, 0.74, 0.66, 0.58, 0.50):
+    if confidences is None:
+        confidences = (0.82, 0.74, 0.66, 0.58, 0.50)
+    for confidence in confidences:
         try:
-            loc = pyautogui.locateOnScreen(path, confidence=confidence, grayscale=True)
+            loc = pyautogui.locateOnScreen(path, confidence=confidence, grayscale=grayscale)
         except Exception:
             loc = None
         if loc:
@@ -915,9 +918,45 @@ def _locate_item_template(name):
     return None
 
 
-def _click_item_template_once(name, wait=0.5, phase="WALL DUMP"):
+def _click_item_template_once(
+    name,
+    wait=0.5,
+    phase="WALL DUMP",
+    *,
+    grayscale=True,
+    confidences=None,
+):
     """Make one non-blocking template search and click if it is visible."""
-    loc = _locate_item_template(name)
+    loc = _locate_item_template(name, grayscale=grayscale, confidences=confidences)
+    if not loc:
+        return False
+    point = pyautogui.center(loc)
+    status(
+        f"ITEM CLICK: {name}.png at ({int(point.x)}, {int(point.y)})",
+        "cyan",
+        phase=phase,
+    )
+    pyautogui.click(point)
+    time.sleep(wait)
+    return True
+
+
+def _locate_cleanup_template(name):
+    """Locate cleanup buttons with color-sensitive, stricter matching.
+
+    End Battle/Surrender are red while Return Home is green. The previous
+    grayscale scan down to 0.50 confidence could cross-match those buttons.
+    """
+    return _locate_item_template(
+        name,
+        grayscale=False,
+        confidences=CLEANUP_MATCH_CONFIDENCES,
+    )
+
+
+def _click_cleanup_template_once(name, wait=0.5, phase="CLEANUP"):
+    """Click one cleanup template using the guarded cleanup matcher."""
+    loc = _locate_cleanup_template(name)
     if not loc:
         return False
     point = pyautogui.center(loc)
@@ -1062,11 +1101,26 @@ def _wall_dump_cycle_impl():
             return
         _click_wall_resource(resource)
         time.sleep(0.6)
-        if not _click_item_template("attack_end_battle_confirm", timeout=8.0, wait=1.2):
-            status("WALL DUMP STOP: confirmation OK button not found", "red", phase="WALL DUMP")
-            return
-        if not _wall_click("wall_upgrade_confirmation", 1.4):
-            status("WALL DUMP STOP: confirmation button not found", "red", phase="WALL DUMP")
+        if selected_walls == 1:
+            # A single-wall upgrade shows the wall-specific confirmation card.
+            confirmation_name = "wall_upgrade_confirmation"
+            confirmation_clicked = _wall_click(confirmation_name, 1.4)
+        else:
+            # A multi-wall upgrade shows the green attack-style Okay button.
+            # This template lives in item/, not item/wall/.
+            confirmation_name = "attack_end_battle_confirm"
+            confirmation_clicked = _click_item_template(
+                confirmation_name,
+                timeout=8.0,
+                wait=1.2,
+                phase="WALL DUMP",
+            )
+        if not confirmation_clicked:
+            status(
+                f"WALL DUMP STOP: {confirmation_name} confirmation not found",
+                "red",
+                phase="WALL DUMP",
+            )
             return
         # Alternate the preferred resource after every completed group. This
         # forces a fresh affordability check for Elixir after a Gold group,
@@ -1128,7 +1182,7 @@ def wait_for_return_home(poll_interval=RETURN_HOME_POLL_INTERVAL):
     stable_point = None
     stable_hits = 0
     while True:
-        return_home_loc = _locate_return_home()
+        return_home_loc = _locate_cleanup_template("return_home")
         if return_home_loc:
             point = pyautogui.center(return_home_loc)
             if stable_point and abs(point.x - stable_point.x) <= 30 and abs(point.y - stable_point.y) <= 30:
@@ -1189,9 +1243,20 @@ def finish_attack():
         poll_started = time.time()
 
         if not end_battle_clicked:
-            # End Battle has priority. Either visual is acceptable.
+            # Return Home must be checked first. The old order allowed a loose
+            # grayscale End Battle match to win even when Return Home was the
+            # actual visible button, sending the state machine into a
+            # confirmation wait that could never succeed.
+            return_home_loc = _locate_cleanup_template("return_home")
+            if return_home_loc:
+                status("RETURN HOME FOUND — clicking it", "green", phase="HOME")
+                _click_return_home(return_home_loc)
+                return
+
+            # Only use strict, color-sensitive matches for End Battle. Either
+            # red End Battle visual is acceptable.
             for end_name in ("end_battle", "end_battle_2"):
-                if _click_item_template_once(end_name, wait=0.8, phase="CLEANUP"):
+                if _click_cleanup_template_once(end_name, wait=0.8, phase="CLEANUP"):
                     end_battle_clicked = True
                     status(
                         f"END BATTLE: clicked {end_name}.png — now finding confirmation",
@@ -1200,19 +1265,10 @@ def finish_attack():
                     )
                     break
 
-            # If neither End Battle image is visible, try Return Home in this
-            # same poll. A single valid match is enough to click it.
-            if not end_battle_clicked:
-                return_home_loc = _locate_return_home()
-                if return_home_loc:
-                    status("RETURN HOME FOUND — clicking it", "green", phase="HOME")
-                    _click_return_home(return_home_loc)
-                    return
-
         elif not confirmation_clicked:
             # Once End Battle was clicked, do not skip confirmation or click
             # Return Home prematurely. Keep searching for the OK image.
-            if _click_item_template_once(
+            if _click_cleanup_template_once(
                 "attack_end_battle_confirm",
                 wait=1.0,
                 phase="CLEANUP",
@@ -1224,9 +1280,19 @@ def finish_attack():
                     phase="CLEANUP",
                     finding="return_home.png will be checked every second",
                 )
+            elif find_item("attack1", confidence=0.88, region=None, grayscale=False):
+                # If a false End Battle match clicked Return Home directly,
+                # the game is already back at the home screen and no
+                # confirmation dialog can appear. Do not wait forever.
+                status(
+                    "CLEANUP: already back on the home screen; confirmation was skipped",
+                    "green",
+                    phase="HOME",
+                )
+                return
 
         else:
-            return_home_loc = _locate_return_home()
+            return_home_loc = _locate_cleanup_template("return_home")
             if return_home_loc:
                 status("RETURN HOME FOUND — clicking it", "green", phase="HOME")
                 _click_return_home(return_home_loc)
