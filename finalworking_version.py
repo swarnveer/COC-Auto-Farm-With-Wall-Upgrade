@@ -893,6 +893,41 @@ def _wall_click(name, wait=0.35):
     return loc
 
 
+def _wall_click_when_visible(
+    name,
+    *,
+    timeout=8.0,
+    initial_delay=0.5,
+    poll_interval=0.25,
+    wait=1.4,
+):
+    """Wait for a wall dialog button to render, then click it once.
+
+    Selecting a resource triggers a short UI transition. A one-shot template
+    lookup can run before the confirmation card has been painted, so this
+    helper gives the dialog a small settling delay and then polls until the
+    button appears or the timeout expires.
+    """
+    if initial_delay > 0:
+        time.sleep(initial_delay)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        loc = _wall_locate(name)
+        if loc:
+            point = pyautogui.center(loc)
+            status(
+                f"WALL CLICK: {name}.png at ({int(point.x)}, {int(point.y)})",
+                "cyan",
+                phase="WALL DUMP",
+            )
+            pyautogui.click(point)
+            time.sleep(wait)
+            return loc
+        time.sleep(poll_interval)
+    status(f"WALL UI NOT FOUND: {name}.png", "red", phase="WALL DUMP")
+    return None
+
+
 def _click_item_template(name, timeout=8.0, wait=0.5, phase="WALL DUMP"):
     """Click a non-wall template and report it in the requested phase."""
     deadline = time.time() + timeout
@@ -1104,7 +1139,13 @@ def _wall_dump_cycle_impl():
         if selected_walls == 1:
             # A single-wall upgrade shows the wall-specific confirmation card.
             confirmation_name = "wall_upgrade_confirmation"
-            confirmation_clicked = _wall_click(confirmation_name, 1.4)
+            confirmation_clicked = _wall_click_when_visible(
+                confirmation_name,
+                timeout=8.0,
+                initial_delay=0.5,
+                poll_interval=0.25,
+                wait=1.4,
+            )
         else:
             # A multi-wall upgrade shows the green attack-style Okay button.
             # This template lives in item/, not item/wall/.
